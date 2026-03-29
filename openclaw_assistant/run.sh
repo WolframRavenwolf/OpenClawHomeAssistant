@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/command/with-contenv bash
 set -euo pipefail
 
 # Ensure Homebrew and brew-installed binaries are in PATH
@@ -66,7 +66,7 @@ GW_ENV_VARS_RAW=$(jq -r '.gateway_env_vars // empty' "$OPTIONS_FILE")
 GW_ENV_VARS_JSON=$(jq -c '.gateway_env_vars // []' "$OPTIONS_FILE")
 
 # Timezone: sync /etc/localtime + /etc/timezone from HA's TZ env var
-if [ -n "$TZ" ] && [[ "$TZ" != *..* ]] && [ -f "/usr/share/zoneinfo/$TZ" ]; then
+if [ -n "${TZ:-}" ] && [[ "${TZ:-}" != *..* ]] && [ -f "/usr/share/zoneinfo/${TZ:-}" ]; then
   ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime
   echo "$TZ" > /etc/timezone
   echo "INFO: Timezone: $TZ"
