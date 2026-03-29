@@ -1,8 +1,16 @@
 configuration:
-  timezone:
-    name: Zeitzone
-    description: Zeitzone für das Add-on (z.B. Europe/Sofia, America/New_York)
-  
+  openclaw_version:
+    name: OpenClaw-Version
+    description: "OpenClaw-Version zur Installation von npm (z.B. 'latest', '2026.3.13'). Wird ignoriert wenn Git-URL gesetzt ist."
+
+  git_url:
+    name: Git-URL
+    description: "Optional: OpenClaw aus einem Git-Repository statt von npm installieren. Wenn gesetzt, wird OpenClaw-Version ignoriert. Unterstützt eingebettete Tokens für private Repos (z.B. https://ghp_token@github.com/user/fork.git)."
+
+  git_ref:
+    name: Git-Ref
+    description: "Git-Branch, -Tag oder Commit-SHA zum Auschecken (verwendet mit Git-URL). Leer lassen für den Standard-Branch des Repositories."
+
   enable_terminal:
     name: Web-Terminal aktivieren
     description: Web-Terminal-Schaltfläche in Home Assistant (Ingress) über ttyd aktivieren
