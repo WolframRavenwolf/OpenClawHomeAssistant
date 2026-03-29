@@ -71,9 +71,9 @@
     <!-- ==================== ACTION BUTTONS ==================== -->
     <div class="row" style="margin-bottom:6px">
       <a class="btn" id="gwbtn" href="__GATEWAY_PUBLIC_URL____GW_PUBLIC_URL_PATH__?token=__GATEWAY_TOKEN__" target="_blank" rel="noopener noreferrer">Open Gateway Web UI</a>
-      <a class="btn secondary" href="./terminal/" target="_self">Open Terminal (full page)</a>
+      <a class="btn secondary" href="./terminal/" target="_top" onclick="document.querySelectorAll('iframe').forEach(function(f){f.remove()})">Open Terminal (full page)</a>
       <a class="btn green hidden" id="certBtn" href="" target="_blank" rel="noopener noreferrer">Download CA Certificate</a>
-      <a class="btn amber" href="/hassio/addon/openclaw_assistant/config" target="_top">Add-on Configuration</a>
+      <a class="btn amber" href="/config/app/__ADDON_SLUG__/info" target="_top" onclick="document.querySelectorAll('iframe').forEach(function(f){f.remove()})">Add-on Configuration</a>
     </div>
 
     <!-- ==================== MIGRATION BANNER ==================== -->
