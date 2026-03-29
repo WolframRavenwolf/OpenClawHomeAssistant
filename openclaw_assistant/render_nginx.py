@@ -106,11 +106,20 @@ def main():
         public_url = f'https://{lan_ip}:{https_port}'
         gw_path = '/'
 
+    # Derive HA addon slug from container hostname (e.g. 13845447-openclaw-assistant → 13845447_openclaw_assistant)
+    try:
+        addon_slug = subprocess.check_output(
+            ['hostname'], text=True, timeout=2
+        ).strip().replace('-', '_')
+    except Exception:
+        addon_slug = 'openclaw_assistant'
+
     landing = landing_tpl.replace('__GATEWAY_TOKEN__', token)
     landing = landing.replace('__GATEWAY_PUBLIC_URL__', public_url)
     landing = landing.replace('__GW_PUBLIC_URL_PATH__', gw_path)
     landing = landing.replace('__ACCESS_MODE__', access_mode)
     landing = landing.replace('__HTTPS_PORT__', https_port if enable_https else '')
+    landing = landing.replace('__ADDON_SLUG__', addon_slug)
     landing = landing.replace('__DISK_TOTAL__', disk_total)
     landing = landing.replace('__DISK_USED__', disk_used)
     landing = landing.replace('__DISK_AVAIL__', disk_avail)
