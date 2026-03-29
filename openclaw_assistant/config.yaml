@@ -25,7 +25,20 @@ map:
   - share:rw
   - media:rw
 options:
-  timezone: "Europe/Sofia"
+  # OpenClaw version to install from npm at runtime.
+  # Examples: "latest", "2026.3.13"
+  # Ignored when git_url is set.
+  openclaw_version: "latest"
+
+  # Optional: install OpenClaw from a Git repository instead of npm.
+  # When set, openclaw_version is ignored.
+  # Examples: "https://github.com/openclaw/openclaw.git",
+  #           "https://ghp_token@github.com/user/fork.git"
+  git_url: ""
+
+  # Git branch, tag, or commit SHA to check out (used with git_url).
+  # Leave empty for the repo's default branch.
+  git_ref: ""
 
   # Enable web terminal inside Home Assistant (Ingress) via ttyd
   enable_terminal: true
@@ -140,7 +153,10 @@ options:
 
 
 schema:
-  timezone: str
+  openclaw_version: str?
+  git_url: str?
+  git_ref: str?
+
   enable_terminal: bool?
   terminal_port: int(1024,65535)?
   gateway_public_url: str?

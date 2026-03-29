@@ -112,9 +112,9 @@ RUN if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then \
     fi
 USER root
 
-# Install OpenClaw globally
-RUN npm config set fund false && npm config set audit false \
-    && npm install -g openclaw@2026.3.13
+# OpenClaw is installed at runtime based on add-on config (openclaw_version / git_url).
+# Only disable npm noise here; the actual install happens in run.sh.
+RUN npm config set fund false && npm config set audit false
 
 # Shell aliases and color options for interactive use
 RUN tee -a /etc/bash.bashrc <<'EOF'

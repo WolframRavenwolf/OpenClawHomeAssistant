@@ -17,7 +17,6 @@ fi
 # Read add-on options (only add-on-specific knobs; OpenClaw is configured via onboarding)
 # ------------------------------------------------------------------------------
 
-TZNAME=$(jq -r '.timezone // "Europe/Sofia"' "$OPTIONS_FILE")
 GW_PUBLIC_URL=$(jq -r '.gateway_public_url // empty' "$OPTIONS_FILE")
 HA_TOKEN=$(jq -r '.homeassistant_token // empty' "$OPTIONS_FILE")
 ADDON_HTTP_PROXY=$(jq -r '.http_proxy // empty' "$OPTIONS_FILE")
@@ -59,11 +58,19 @@ FORCE_IPV4_DNS=$(jq -r '.force_ipv4_dns // true' "$OPTIONS_FILE")
 ACCESS_MODE=$(jq -r '.access_mode // "custom"' "$OPTIONS_FILE")
 NGINX_LOG_LEVEL=$(jq -r '.nginx_log_level // "minimal"' "$OPTIONS_FILE")
 AUTO_CONFIGURE_MCP=$(jq -r '.auto_configure_mcp // false' "$OPTIONS_FILE")
+OPENCLAW_VERSION=$(jq -r '.openclaw_version // "latest"' "$OPTIONS_FILE")
+GIT_URL=$(jq -r '.git_url // empty' "$OPTIONS_FILE")
+GIT_REF=$(jq -r '.git_ref // empty' "$OPTIONS_FILE")
 GW_ENV_VARS_TYPE=$(jq -r 'if .gateway_env_vars == null then "null" else (.gateway_env_vars | type) end' "$OPTIONS_FILE")
 GW_ENV_VARS_RAW=$(jq -r '.gateway_env_vars // empty' "$OPTIONS_FILE")
 GW_ENV_VARS_JSON=$(jq -c '.gateway_env_vars // []' "$OPTIONS_FILE")
 
-export TZ="$TZNAME"
+# Timezone: sync /etc/localtime + /etc/timezone from HA's TZ env var
+if [ -n "$TZ" ] && [[ "$TZ" != *..* ]] && [ -f "/usr/share/zoneinfo/$TZ" ]; then
+  ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime
+  echo "$TZ" > /etc/timezone
+  echo "INFO: Timezone: $TZ"
+fi
 
 # ------------------------------------------------------------------------------
 # Access mode presets — override individual gateway settings for common scenarios
@@ -150,40 +157,10 @@ export XDG_CONFIG_HOME=/config
 mkdir -p /config/.openclaw /config/.openclaw/identity /config/clawd /config/keys /config/secrets
 
 # ------------------------------------------------------------------------------
-# Sync built-in OpenClaw skills from image to persistent storage
-# On each startup, copy new/updated built-in skills so they survive rebuilds.
-# We sync them to /config/.openclaw/skills and symlink back.
-# NOTE: We cannot use `npm root -g` here because HOME=/config may contain a
-# persisted .npmrc with a custom prefix from a previous run. Instead, we
-# resolve the real image path by temporarily overriding HOME.
-# ------------------------------------------------------------------------------
-IMAGE_SKILLS_DIR="$(HOME=/root npm root -g 2>/dev/null)/openclaw/skills"
-PERSISTENT_SKILLS_DIR="/config/.openclaw/skills"
-
-if [ -d "$IMAGE_SKILLS_DIR" ] && [ ! -L "$IMAGE_SKILLS_DIR" ]; then
-  mkdir -p "$PERSISTENT_SKILLS_DIR"
-  # Sync skills: --update replaces older files so upgrades propagate,
-  # but doesn't delete user-added files in persistent storage.
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a --update "$IMAGE_SKILLS_DIR/" "$PERSISTENT_SKILLS_DIR/" 2>/dev/null || true
-  else
-    cp -ru "$IMAGE_SKILLS_DIR/"* "$PERSISTENT_SKILLS_DIR/" 2>/dev/null || true
-  fi
-  # Replace image skills dir with symlink to persistent copy
-  rm -rf "$IMAGE_SKILLS_DIR"
-  ln -sf "$PERSISTENT_SKILLS_DIR" "$IMAGE_SKILLS_DIR"
-  echo "INFO: Synced built-in skills to persistent storage at $PERSISTENT_SKILLS_DIR"
-elif [ -L "$IMAGE_SKILLS_DIR" ]; then
-  echo "INFO: Built-in skills already linked to persistent storage"
-else
-  echo "WARN: Built-in skills directory not found at $IMAGE_SKILLS_DIR"
-fi
-
-# ------------------------------------------------------------------------------
-# Persist user-installed node skills across Docker image rebuilds
+# Persist user-installed node packages across Docker image rebuilds
 # Redirect npm/pnpm global installs to /config/.node_global (persistent storage)
-# so that skills installed via the dashboard survive container rebuilds.
-# NOTE: This MUST come after the skills sync above (which needs the original npm root -g).
+# so that OpenClaw and skills installed via the dashboard survive container rebuilds.
+# This MUST come before the OpenClaw runtime install so it goes to persistent storage.
 # ------------------------------------------------------------------------------
 PERSISTENT_NODE_GLOBAL="/config/.node_global"
 mkdir -p "$PERSISTENT_NODE_GLOBAL"
@@ -195,6 +172,177 @@ export NODE_PATH="${PERSISTENT_NODE_GLOBAL}/lib/node_modules:${NODE_PATH:-}"
 export PNPM_HOME="${PERSISTENT_NODE_GLOBAL}/pnpm"
 mkdir -p "$PNPM_HOME"
 export PATH="${PNPM_HOME}:${PATH}"
+
+# ------------------------------------------------------------------------------
+# Install/update OpenClaw at runtime based on add-on configuration
+# Priority: git_url (from source) > openclaw_version (from npm registry)
+# Installed to persistent npm prefix so it survives container rebuilds.
+# ------------------------------------------------------------------------------
+OPENCLAW_SRC_DIR="/config/.openclaw-src"
+OPENCLAW_INSTALL_MARKER="/config/.openclaw-installed-version"
+
+if [ -n "$GIT_URL" ]; then
+  # ---- Git-based install ----
+  # Redact credentials from URL for logging (strip user:pass@ or token@)
+  GIT_URL_SAFE=$(echo "$GIT_URL" | sed -E 's|://[^@]+@|://***@|')
+  echo "INFO: OpenClaw install source: git"
+  echo "INFO:   URL: $GIT_URL_SAFE"
+  echo "INFO:   Ref: ${GIT_REF:-<default branch>}"
+
+  GIT_OK=true
+  if [ ! -d "$OPENCLAW_SRC_DIR/.git" ]; then
+    echo "INFO: Cloning repository..."
+    rm -rf "$OPENCLAW_SRC_DIR"
+    if ! git clone "$GIT_URL" "$OPENCLAW_SRC_DIR"; then
+      echo "ERROR: git clone failed for $GIT_URL_SAFE"
+      GIT_OK=false
+    fi
+  else
+    echo "INFO: Updating existing clone..."
+    git -C "$OPENCLAW_SRC_DIR" remote set-url origin "$GIT_URL"
+    if ! git -C "$OPENCLAW_SRC_DIR" fetch --prune --tags; then
+      echo "WARN: git fetch failed; using existing local state"
+    fi
+    git -C "$OPENCLAW_SRC_DIR" reset --hard 2>/dev/null || true
+    git -C "$OPENCLAW_SRC_DIR" clean -fd 2>/dev/null || true
+  fi
+
+  # Checkout requested ref (branch, tag, or commit SHA)
+  if [ "$GIT_OK" = "true" ] && [ -d "$OPENCLAW_SRC_DIR/.git" ]; then
+    if [ -n "$GIT_REF" ]; then
+      if git -C "$OPENCLAW_SRC_DIR" rev-parse --verify "origin/$GIT_REF" >/dev/null 2>&1; then
+        echo "INFO: Checking out branch: $GIT_REF"
+        git -C "$OPENCLAW_SRC_DIR" checkout -B "$GIT_REF" "origin/$GIT_REF"
+      else
+        echo "INFO: Checking out tag/commit: $GIT_REF"
+        if ! git -C "$OPENCLAW_SRC_DIR" checkout --force "$GIT_REF"; then
+          echo "ERROR: Failed to checkout ref: $GIT_REF"
+          GIT_OK=false
+        fi
+      fi
+    else
+      DEFAULT_BRANCH=$(git -C "$OPENCLAW_SRC_DIR" remote show origin 2>/dev/null | sed -n '/HEAD branch/s/.*: //p')
+      if [ -n "$DEFAULT_BRANCH" ]; then
+        git -C "$OPENCLAW_SRC_DIR" checkout "$DEFAULT_BRANCH" 2>/dev/null || true
+        git -C "$OPENCLAW_SRC_DIR" reset --hard "origin/$DEFAULT_BRANCH" 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  if [ "$GIT_OK" = "true" ] && [ -d "$OPENCLAW_SRC_DIR/.git" ]; then
+    CURRENT_HEAD=$(git -C "$OPENCLAW_SRC_DIR" rev-parse HEAD)
+    STORED_MARKER=$(cat "$OPENCLAW_INSTALL_MARKER" 2>/dev/null || echo "")
+
+    if [ "git:${CURRENT_HEAD}" != "$STORED_MARKER" ] || ! command -v openclaw >/dev/null 2>&1; then
+      echo "INFO: Installing OpenClaw from source (HEAD: ${CURRENT_HEAD:0:12})..."
+      if (cd "$OPENCLAW_SRC_DIR" && npm install && npm run build --if-present) && \
+         npm install -g "$OPENCLAW_SRC_DIR"; then
+        printf 'git:%s' "$CURRENT_HEAD" > "$OPENCLAW_INSTALL_MARKER"
+        echo "INFO: OpenClaw installed from git (HEAD: ${CURRENT_HEAD:0:12})"
+      else
+        echo "ERROR: Failed to build/install OpenClaw from source"
+        if command -v openclaw >/dev/null 2>&1; then
+          echo "WARN: Falling back to previously installed OpenClaw"
+        else
+          echo "ERROR: No OpenClaw available. Check git_url and retry."
+          exit 1
+        fi
+      fi
+    else
+      echo "INFO: OpenClaw from git unchanged (HEAD: ${CURRENT_HEAD:0:12}), skipping install"
+    fi
+  else
+    if command -v openclaw >/dev/null 2>&1; then
+      echo "WARN: Git install failed; falling back to previously installed OpenClaw"
+    else
+      echo "ERROR: Git install failed and no OpenClaw available. Check git_url and retry."
+      exit 1
+    fi
+  fi
+
+else
+  # ---- npm registry install ----
+  echo "INFO: OpenClaw install source: npm (version: ${OPENCLAW_VERSION})"
+  STORED_MARKER=$(cat "$OPENCLAW_INSTALL_MARKER" 2>/dev/null || echo "")
+  NEEDS_INSTALL=false
+
+  if [ "$OPENCLAW_VERSION" = "latest" ]; then
+    DESIRED_VERSION=$(npm view openclaw version 2>/dev/null || echo "")
+    if [ -z "$DESIRED_VERSION" ]; then
+      echo "WARN: Could not fetch latest OpenClaw version from npm registry"
+      if command -v openclaw >/dev/null 2>&1; then
+        echo "INFO: Using previously installed OpenClaw"
+      else
+        echo "INFO: No OpenClaw installed; attempting install anyway..."
+        NEEDS_INSTALL=true
+      fi
+    elif [ "npm:${DESIRED_VERSION}" != "$STORED_MARKER" ]; then
+      NEEDS_INSTALL=true
+    fi
+  else
+    DESIRED_VERSION="$OPENCLAW_VERSION"
+    if [ "npm:${DESIRED_VERSION}" != "$STORED_MARKER" ]; then
+      NEEDS_INSTALL=true
+    fi
+  fi
+
+  # Also install if the binary is missing (e.g., persistent storage was wiped)
+  if ! command -v openclaw >/dev/null 2>&1; then
+    NEEDS_INSTALL=true
+  fi
+
+  if [ "$NEEDS_INSTALL" = "true" ]; then
+    echo "INFO: Installing openclaw@${OPENCLAW_VERSION} ..."
+    if npm install -g "openclaw@${OPENCLAW_VERSION}"; then
+      ACTUAL_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | sed -n 's/.*openclaw@//p' || echo "$OPENCLAW_VERSION")
+      printf 'npm:%s' "$ACTUAL_VERSION" > "$OPENCLAW_INSTALL_MARKER"
+      echo "INFO: OpenClaw $ACTUAL_VERSION installed successfully"
+    else
+      echo "ERROR: Failed to install openclaw@${OPENCLAW_VERSION} from npm"
+      if command -v openclaw >/dev/null 2>&1; then
+        echo "WARN: Falling back to previously installed OpenClaw"
+      else
+        echo "ERROR: No OpenClaw available. Check network connectivity and retry."
+        exit 1
+      fi
+    fi
+  else
+    echo "INFO: OpenClaw already at target version, skipping install"
+  fi
+
+  # Clean up leftover git source if switching from git to npm
+  if [ -d "$OPENCLAW_SRC_DIR" ]; then
+    echo "INFO: Removing previous git clone at $OPENCLAW_SRC_DIR"
+    rm -rf "$OPENCLAW_SRC_DIR"
+  fi
+fi
+
+# ------------------------------------------------------------------------------
+# Sync built-in OpenClaw skills to persistent storage
+# Copy new/updated built-in skills so they survive version changes.
+# We sync them to /config/.openclaw/skills and symlink back.
+# ------------------------------------------------------------------------------
+INSTALLED_SKILLS_DIR="$(npm root -g 2>/dev/null)/openclaw/skills"
+PERSISTENT_SKILLS_DIR="/config/.openclaw/skills"
+
+if [ -d "$INSTALLED_SKILLS_DIR" ] && [ ! -L "$INSTALLED_SKILLS_DIR" ]; then
+  mkdir -p "$PERSISTENT_SKILLS_DIR"
+  # Sync skills: --update replaces older files so upgrades propagate,
+  # but doesn't delete user-added files in persistent storage.
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --update "$INSTALLED_SKILLS_DIR/" "$PERSISTENT_SKILLS_DIR/" 2>/dev/null || true
+  else
+    cp -ru "$INSTALLED_SKILLS_DIR/"* "$PERSISTENT_SKILLS_DIR/" 2>/dev/null || true
+  fi
+  # Replace installed skills dir with symlink to persistent copy
+  rm -rf "$INSTALLED_SKILLS_DIR"
+  ln -sf "$PERSISTENT_SKILLS_DIR" "$INSTALLED_SKILLS_DIR"
+  echo "INFO: Synced built-in skills to persistent storage at $PERSISTENT_SKILLS_DIR"
+elif [ -L "$INSTALLED_SKILLS_DIR" ]; then
+  echo "INFO: Built-in skills already linked to persistent storage"
+else
+  echo "WARN: Built-in skills directory not found at $INSTALLED_SKILLS_DIR"
+fi
 
 # Protect critical runtime variables from accidental override via gateway_env_vars.
 is_reserved_gateway_env_var() {
@@ -713,9 +861,9 @@ fi
 
 # ------------------------------------------------------------------------------
 # Proxy shim for undici/OpenClaw startup
-# Keep official OpenClaw npm release while enabling HTTP(S)_PROXY support.
+# Enables HTTP(S)_PROXY support for OpenClaw network calls.
 # ------------------------------------------------------------------------------
-OPENCLAW_GLOBAL_NODE_MODULES="$(HOME=/root npm root -g 2>/dev/null || true)"
+OPENCLAW_GLOBAL_NODE_MODULES="$(npm root -g 2>/dev/null || true)"
 if [ -f /usr/local/lib/openclaw-proxy-shim.cjs ]; then
   if [ -n "${NODE_OPTIONS:-}" ]; then
     export NODE_OPTIONS="--require /usr/local/lib/openclaw-proxy-shim.cjs ${NODE_OPTIONS}"
