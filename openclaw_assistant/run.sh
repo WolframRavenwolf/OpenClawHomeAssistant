@@ -235,7 +235,7 @@ if [ -n "$GIT_URL" ]; then
 
     if [ "git:${CURRENT_HEAD}" != "$STORED_MARKER" ] || ! command -v openclaw >/dev/null 2>&1; then
       echo "INFO: Installing OpenClaw from source (HEAD: ${CURRENT_HEAD:0:12})..."
-      if (cd "$OPENCLAW_SRC_DIR" && pnpm install --no-frozen-lockfile --prod=false && pnpm run build) && \
+      if (cd "$OPENCLAW_SRC_DIR" && pnpm install --no-frozen-lockfile --prod=false && pnpm run build && pnpm ui:build) && \
          npm install -g "$OPENCLAW_SRC_DIR"; then
         printf 'git:%s' "$CURRENT_HEAD" > "$OPENCLAW_INSTALL_MARKER"
         echo "INFO: OpenClaw installed from git (HEAD: ${CURRENT_HEAD:0:12})"
